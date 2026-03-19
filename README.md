@@ -825,13 +825,6 @@ async function analyzeShots() {
   }
 }
 
-  } catch(e) {
-    document.getElementById('analyzeBar').classList.remove('on');
-    document.getElementById('analyzeBtn').disabled = false;
-    toast('Error: ' + e.message, true);
-  }
-}
-
 // ── Save ──
 function saveEntry() {
   const entry = {

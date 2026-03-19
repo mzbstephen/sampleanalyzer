@@ -163,6 +163,22 @@ td{padding:10px 12px;vertical-align:middle}
 .search-bar input{flex:1;background:var(--paper);border:1.5px solid var(--warm2);border-radius:7px;padding:7px 12px;font-family:'DM Mono',monospace;font-size:12px;color:var(--ink);outline:none}
 .search-bar input:focus{border-color:var(--green2)}
 
+/* Error log */
+.err-log{margin:0 24px 0;border:1.5px solid var(--red);border-radius:var(--radius);overflow:hidden;display:none}
+.err-log.has-errors{display:block}
+.err-log-head{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:rgba(174,32,18,.08);cursor:pointer;user-select:none}
+.err-log-title{font-family:'DM Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--red);display:flex;align-items:center;gap:7px}
+.err-badge{background:var(--red);color:#fff;font-size:9px;padding:1px 6px;border-radius:10px;font-family:'DM Mono',monospace}
+.err-log-actions{display:flex;gap:8px;align-items:center}
+.err-toggle{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;cursor:pointer;background:none;border:none;padding:2px 6px}
+.err-log-body{max-height:180px;overflow-y:auto;padding:0}
+.err-log-body.collapsed{display:none}
+.err-row{display:grid;grid-template-columns:auto auto 1fr;gap:0;border-top:1px solid rgba(174,32,18,.15);font-family:'DM Mono',monospace;font-size:11px}
+.err-row:first-child{border-top:none}
+.err-time{padding:7px 10px;color:var(--faint);white-space:nowrap;border-right:1px solid rgba(174,32,18,.12)}
+.err-type{padding:7px 10px;color:var(--orange);white-space:nowrap;border-right:1px solid rgba(174,32,18,.12)}
+.err-msg{padding:7px 12px;color:var(--red);word-break:break-word;line-height:1.5}
+
 .toast{position:fixed;bottom:22px;right:22px;background:var(--ink);color:var(--cream);border-left:3px solid var(--green);border-radius:8px;padding:11px 18px;font-size:13px;font-family:'DM Sans',sans-serif;box-shadow:var(--shadow2);transform:translateY(70px);opacity:0;transition:all .3s cubic-bezier(.34,1.56,.64,1);z-index:999;pointer-events:none}
 .toast.show{transform:translateY(0);opacity:1}
 
@@ -257,6 +273,20 @@ td{padding:10px 12px;vertical-align:middle}
 
     <div class="search-bar">
       <input type="text" id="searchBox" placeholder="Search by ID, name, brand, barcode…" oninput="renderTable()" />
+    </div>
+
+    <!-- Error log -->
+    <div class="err-log" id="errLog" style="margin-top:12px">
+      <div class="err-log-head" onclick="toggleErrLog()">
+        <div class="err-log-title">
+          ⚠ Error Log <span class="err-badge" id="errBadge">0</span>
+        </div>
+        <div class="err-log-actions">
+          <button class="err-toggle" id="errToggleBtn">▾ collapse</button>
+          <button class="err-toggle" onclick="clearErrLog(event)" style="color:var(--red)">✕ clear</button>
+        </div>
+      </div>
+      <div class="err-log-body" id="errLogBody"></div>
     </div>
 
     <div class="analyzing-bar" id="analyzeBar">
@@ -450,6 +480,7 @@ async function requestPermission() {
     const msg = e.name === 'NotAllowedError' ? 'Camera permission denied. Allow camera access in browser settings.'
       : e.name === 'NotFoundError' ? 'No camera found on this device.'
       : 'Camera error: ' + e.message;
+    logError('Camera', msg);
     toast(msg, true); return false;
   }
 }
@@ -763,11 +794,26 @@ Cross-reference all images. If a field appears in multiple images choose the cle
 
   if (!resp.ok) {
     const e = await resp.json().catch(() => ({}));
-    throw new Error(e.error?.message || `Gemini error ${resp.status}: ${resp.statusText}`);
+    const detail = e.error?.message || `HTTP ${resp.status}: ${resp.statusText}`;
+    const code   = e.error?.code || resp.status;
+    logError(`Gemini ${code}`, detail);
+    throw new Error(detail);
   }
 
   const data = await resp.json();
-  const raw  = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+
+  // Log if Gemini returned a safety block or empty response
+  const candidate = data.candidates?.[0];
+  if (!candidate) {
+    const reason = data.promptFeedback?.blockReason || 'No candidates returned';
+    logError('Gemini', reason);
+    throw new Error('Gemini returned no response — ' + reason);
+  }
+  if (candidate.finishReason && candidate.finishReason !== 'STOP') {
+    logError('Gemini', `Finish reason: ${candidate.finishReason}`);
+  }
+
+  const raw  = candidate.content?.parts?.[0]?.text || '{}';
   const clean = raw.replace(/```json|```/g, '').trim();
 
   try {
@@ -959,6 +1005,49 @@ function exportXLSX() {
   toast(`Exported ${inventory.length} rows as Excel`);
 }
 
+// ── Error log ──
+const errorLog = [];
+
+function logError(type, message) {
+  const entry = {
+    time: new Date().toLocaleTimeString(),
+    type,
+    message
+  };
+  errorLog.unshift(entry); // newest first
+  renderErrLog();
+}
+
+function renderErrLog() {
+  const panel  = document.getElementById('errLog');
+  const body   = document.getElementById('errLogBody');
+  const badge  = document.getElementById('errBadge');
+  if (!errorLog.length) { panel.classList.remove('has-errors'); return; }
+  panel.classList.add('has-errors');
+  badge.textContent = errorLog.length;
+  body.innerHTML = errorLog.map(e => `
+    <div class="err-row">
+      <span class="err-time">${e.time}</span>
+      <span class="err-type">${e.type}</span>
+      <span class="err-msg">${e.message}</span>
+    </div>`).join('');
+}
+
+function toggleErrLog() {
+  const body = document.getElementById('errLogBody');
+  const btn  = document.getElementById('errToggleBtn');
+  const collapsed = body.classList.toggle('collapsed');
+  btn.textContent = collapsed ? '▸ expand' : '▾ collapse';
+}
+
+function clearErrLog(e) {
+  e.stopPropagation();
+  errorLog.length = 0;
+  document.getElementById('errLog').classList.remove('has-errors');
+  document.getElementById('errLogBody').innerHTML = '';
+  document.getElementById('errBadge').textContent = '0';
+}
+
 function today() { return new Date().toISOString().slice(0,10); }
 function toggleKey() { const i = document.getElementById('apiKey'); i.type = i.type==='password'?'text':'password'; }
 
@@ -968,6 +1057,8 @@ function toast(msg, err=false) {
   t.textContent = msg; t.style.borderLeftColor = err ? 'var(--red)' : 'var(--green)';
   t.classList.add('show'); clearTimeout(toastT);
   toastT = setTimeout(() => t.classList.remove('show'), 3000);
+  // Also log errors to the error panel
+  if (err) logError('App', msg);
 }
 
 buildGrid();

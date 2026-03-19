@@ -1,3 +1,4 @@
+
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -189,14 +190,17 @@ td{padding:10px 12px;vertical-align:middle}
   <div class="left-panel">
 
     <div class="section">
-      <div class="section-label">Google Cloud Vision API Key</div>
-      <div class="key-row">
-        <input type="password" id="apiKey" placeholder="AIza…" />
+      <div class="section-label">Azure AI Vision</div>
+      <div class="key-row" style="margin-bottom:8px">
+        <input type="password" id="apiKey" placeholder="Azure Key 1…" />
         <button class="btn btn-icon btn-sm" onclick="toggleKey()">👁</button>
       </div>
-      <div style="margin-top:7px;font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;line-height:1.6">
-        Free: 1,000 req/month &nbsp;·&nbsp;
-        <a href="https://console.cloud.google.com" target="_blank" style="color:var(--green2)">Get key ↗</a>
+      <div style="margin-bottom:6px">
+        <input type="text" id="azureEndpoint" placeholder="https://yourresource.cognitiveservices.azure.com/" style="font-size:11px;width:100%" />
+      </div>
+      <div style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;line-height:1.6">
+        S0 · 1,000 free/month then $1.50 per 1k &nbsp;·&nbsp;
+        <a href="https://portal.azure.com" target="_blank" style="color:var(--green2)">portal.azure.com ↗</a>
       </div>
     </div>
 
@@ -263,7 +267,7 @@ td{padding:10px 12px;vertical-align:middle}
       <div class="spinner"></div>
       <div class="analyzing-text">
         <strong>Reading product labels…</strong>
-        Google Cloud Vision OCR · scanning images in parallel
+        Azure AI Vision OCR · scanning images in parallel
       </div>
     </div>
 
@@ -705,26 +709,47 @@ function cropToRoi(base64img, roi) {
 }
 
 async function visionOCR(apiKey, base64img) {
-  const body = {
-    requests: [{
-      image: { content: base64img },
-      features: [
-        { type: 'TEXT_DETECTION',    maxResults: 1 },
-        { type: 'BARCODE_DETECTION', maxResults: 5 }
-      ]
-    }]
-  };
-  const resp = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-  );
-  if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || 'Google Vision API error'); }
-  const data   = await resp.json();
-  const result = data.responses[0];
-  return {
-    fullText: result.fullTextAnnotation?.text || result.textAnnotations?.[0]?.description || '',
-    barcodes: (result.barcodeAnnotations || []).map(b => b.rawValue).filter(Boolean)
-  };
+  const endpoint = (document.getElementById('azureEndpoint').value.trim() || '').replace(/\/$/, '');
+  if (!endpoint) throw new Error('Azure endpoint URL is required');
+
+  // Convert base64 to binary blob for the submit call
+  const binary = atob(base64img);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: 'image/jpeg' });
+
+  // Step 1 — Submit image to Read API (async operation)
+  const submitUrl = `${endpoint}/computervision/imageanalysis:analyze?api-version=2024-02-01&features=read`;
+  const submitResp = await fetch(submitUrl, {
+    method: 'POST',
+    headers: {
+      'Ocp-Apim-Subscription-Key': apiKey,
+      'Content-Type': 'image/jpeg'
+    },
+    body: blob
+  });
+
+  if (!submitResp.ok) {
+    const e = await submitResp.json().catch(() => ({}));
+    throw new Error(e.error?.message || `Azure error ${submitResp.status}: ${submitResp.statusText}`);
+  }
+
+  const resultData = await submitResp.json();
+
+  // Extract all text lines from the Read result
+  const readResult = resultData?.readResult;
+  const lines = readResult?.blocks?.flatMap(b => b.lines) || [];
+  const fullText = lines.map(l => l.text).join('\n');
+
+  // Azure Image Analysis 2024 doesn't return barcodes in this endpoint —
+  // extract numeric sequences from text as barcode candidates
+  const barcodes = [];
+  for (const line of lines) {
+    const clean = line.text.replace(/\s/g, '');
+    if (/^\d{8,14}$/.test(clean)) barcodes.push(clean);
+  }
+
+  return { fullText, barcodes };
 }
 
 // ── Smart label parser ──
@@ -793,8 +818,10 @@ async function roiFieldTexts(apiKey, base64img, slotRois) {
 }
 
 async function analyzeShots() {
-  const key = document.getElementById('apiKey').value.trim();
-  if (!key) { toast('Enter your Google Vision API key first', true); return; }
+  const key      = document.getElementById('apiKey').value.trim();
+  const endpoint = document.getElementById('azureEndpoint').value.trim();
+  if (!key)      { toast('Enter your Azure API key first', true); return; }
+  if (!endpoint) { toast('Enter your Azure endpoint URL first', true); return; }
   const imgs = shots.map((s, i) => s ? { data: s.split(',')[1], idx: i } : null).filter(Boolean);
   if (!imgs.length) { toast('Capture at least one shot', true); return; }
 
@@ -1028,9 +1055,8 @@ function toast(msg, err=false) {
 }
 
 buildGrid();
+document.getElementById('azureEndpoint').value = 'https://samplescanner.cognitiveservices.azure.com/';
 </script>
-
-<!-- SBC note (hidden, for reference) -->
 <!--
   BUDGET SBC OPTIONS WITH ONBOARD OCR (no API needed):
   1. Raspberry Pi 4 (2GB) ~$45 + camera module ~$25

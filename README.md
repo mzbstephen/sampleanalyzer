@@ -1,4 +1,3 @@
-
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -190,17 +189,14 @@ td{padding:10px 12px;vertical-align:middle}
   <div class="left-panel">
 
     <div class="section">
-      <div class="section-label">Azure AI Vision</div>
-      <div class="key-row" style="margin-bottom:8px">
-        <input type="password" id="apiKey" placeholder="Azure Key 1…" />
+      <div class="section-label">Gemini API Key</div>
+      <div class="key-row">
+        <input type="password" id="apiKey" placeholder="AIza…" />
         <button class="btn btn-icon btn-sm" onclick="toggleKey()">👁</button>
       </div>
-      <div style="margin-bottom:6px">
-        <input type="text" id="azureEndpoint" placeholder="https://yourresource.cognitiveservices.azure.com/" style="font-size:11px;width:100%" />
-      </div>
-      <div style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;line-height:1.6">
-        S0 · 1,000 free/month then $1.50 per 1k &nbsp;·&nbsp;
-        <a href="https://portal.azure.com" target="_blank" style="color:var(--green2)">portal.azure.com ↗</a>
+      <div style="margin-top:7px;font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;line-height:1.6">
+        Free · 1,500 req/day &nbsp;·&nbsp;
+        <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--green2)">aistudio.google.com ↗</a>
       </div>
     </div>
 
@@ -267,7 +263,7 @@ td{padding:10px 12px;vertical-align:middle}
       <div class="spinner"></div>
       <div class="analyzing-text">
         <strong>Reading product labels…</strong>
-        Azure AI Vision OCR · scanning images in parallel
+        Gemini 1.5 Flash · reading all images simultaneously
       </div>
     </div>
 
@@ -708,120 +704,85 @@ function cropToRoi(base64img, roi) {
   });
 }
 
-async function visionOCR(apiKey, base64img) {
-  const endpoint = (document.getElementById('azureEndpoint').value.trim() || '').replace(/\/$/, '');
-  if (!endpoint) throw new Error('Azure endpoint URL is required');
+// ════════════════════════════════════════════
+// GEMINI OCR ENGINE
+// ════════════════════════════════════════════
 
-  // Convert base64 to binary blob for the submit call
-  const binary = atob(base64img);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const blob = new Blob([bytes], { type: 'image/jpeg' });
+// Send multiple images + optional ROI context to Gemini, get structured JSON back
+async function geminiAnalyze(apiKey, imageSlots) {
+  // imageSlots: [{ base64, label, rois }]  rois may be empty/null
 
-  // Step 1 — Submit image to Read API (async operation)
-  const submitUrl = `${endpoint}/computervision/imageanalysis:analyze?api-version=2024-02-01&features=read`;
-  const submitResp = await fetch(submitUrl, {
-    method: 'POST',
-    headers: {
-      'Ocp-Apim-Subscription-Key': apiKey,
-      'Content-Type': 'image/jpeg'
-    },
-    body: blob
+  const parts = [];
+
+  for (const slot of imageSlots) {
+    // If ROIs are defined, crop each and send crops instead of full image
+    if (slot.rois && slot.rois.length > 0) {
+      parts.push({ text: `Image: ${slot.label} (ROI crops follow)` });
+      for (const roi of slot.rois) {
+        const cropped = await cropToRoi(slot.base64, roi);
+        parts.push({
+          inline_data: { mime_type: 'image/jpeg', data: cropped }
+        });
+        parts.push({ text: `(above crop is for field: ${ROI_LABELS[roi.field]})` });
+      }
+    } else {
+      // No ROIs — send full image
+      parts.push({ text: `Image: ${slot.label}` });
+      parts.push({
+        inline_data: { mime_type: 'image/jpeg', data: slot.base64 }
+      });
+    }
+  }
+
+  parts.push({
+    text: `You are an expert at reading food and beverage product labels.
+Examine all the images above (multiple angles / crops of the same product).
+Extract every piece of text you can see and return ONLY a JSON object — no markdown, no explanation:
+{
+  "name": "full product name as it appears on the label, or null",
+  "brand": "brand or manufacturer name, or null",
+  "expiration": "expiration / best-by / use-by / sell-by date in the exact format printed, or null",
+  "sku": "barcode number (UPC/EAN/GTIN/SKU) — numeric digits only, or null",
+  "size": "net weight, volume, or count e.g. '12 fl oz', '500g', '24 ct', or null",
+  "notes": "flavor, variety, key allergens, or other useful label details, max 180 chars, or null"
+}
+Cross-reference all images. If a field appears in multiple images choose the clearest reading.`
   });
 
-  if (!submitResp.ok) {
-    const e = await submitResp.json().catch(() => ({}));
-    throw new Error(e.error?.message || `Azure error ${submitResp.status}: ${submitResp.statusText}`);
-  }
-
-  const resultData = await submitResp.json();
-
-  // Extract all text lines from the Read result
-  const readResult = resultData?.readResult;
-  const lines = readResult?.blocks?.flatMap(b => b.lines) || [];
-  const fullText = lines.map(l => l.text).join('\n');
-
-  // Azure Image Analysis 2024 doesn't return barcodes in this endpoint —
-  // extract numeric sequences from text as barcode candidates
-  const barcodes = [];
-  for (const line of lines) {
-    const clean = line.text.replace(/\s/g, '');
-    if (/^\d{8,14}$/.test(clean)) barcodes.push(clean);
-  }
-
-  return { fullText, barcodes };
-}
-
-// ── Smart label parser ──
-function parseLabel(allText, allBarcodes) {
-  const lines = allText.split(/\n+/).map(l => l.trim()).filter(Boolean);
-  const text  = allText;
-
-  const expPatterns = [
-    /(?:exp(?:iry|ires?|[. :])|best[ -]?by[: ]|use[ -]?by[: ]|sell[ -]?by[: ]|bb[: ]|bbd[: ])\s*([A-Za-z0-9\/\-\. ]{4,20})/i,
-    /\b((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}[,\s]+\d{2,4})\b/i,
-    /\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\b/,
-    /\b(\d{4}[\/\-]\d{2}[\/\-]\d{2})\b/,
-    /\b(\d{2}[\/\-]\d{4})\b/
-  ];
-  let expiration = null;
-  for (const pat of expPatterns) { const m = text.match(pat); if (m) { expiration = (m[1]||m[0]).trim(); break; } }
-
-  let sku = allBarcodes.length ? allBarcodes[0] : null;
-  if (!sku) {
-    const skuMatches = [...text.matchAll(/\b(\d{8,14})\b/g)].map(m => m[1]);
-    sku = skuMatches.find(s => s.length===12||s.length===13) || skuMatches.find(s => s.length>=8) || null;
-  }
-
-  const sizeMatch = text.match(/\b(\d+\.?\d*\s*(?:fl\.?\s*oz|oz|lb|lbs|g|kg|ml|l|liters?|ounces?|pounds?|ct|count|pcs|pieces?|pack))\b/i);
-  const size = sizeMatch ? sizeMatch[1].replace(/\s+/g,' ').trim() : null;
-
-  const junk = /^[\d\s\-\/\.\,]+$|www\.|\.com|@|\bllc\b|\binc\b|\bcorp\b|tel:|fax:|distributed|manufactured|contains|ingredients|nutrition|serving|calories|total|sodium|sugar|protein|fat|carb|\bpo box\b/i;
-  const candidates = lines.filter(l => l.length > 2 && l.length < 60 && !junk.test(l) && !/^\d{6,}$/.test(l));
-  const brand = candidates[0] || null;
-  const name  = candidates.slice(0, 3).join(' ') || null;
-
-  const allergenMatch = text.match(/contains?:?\s*([^\.\n]{5,80})/i);
-  const flavorMatches = [...new Set((text.match(/\b(original|classic|light|diet|zero|sugar[ -]free|organic|natural|low[ -]fat|whole grain|gluten[ -]free|vegan|vitamin[- ][a-z])\b/gi)||[]).map(s=>s.toLowerCase()))];
-  let notes = '';
-  if (allergenMatch) notes += 'Contains: ' + allergenMatch[1].trim().slice(0,80);
-  if (flavorMatches.length) notes += (notes?' | ':'') + flavorMatches.slice(0,4).join(', ');
-  notes = notes.slice(0,180) || null;
-
-  return { brand, name, expiration, sku, size, notes };
-}
-
-// ── ROI-aware field text map ──
-// Returns { fieldName: combinedText } from ROI-cropped OCR, falls back to full-image parse
-async function roiFieldTexts(apiKey, base64img, slotRois) {
-  if (!slotRois || slotRois.length === 0) return null;
-
-  // Group ROIs by field
-  const byField = {};
-  for (const roi of slotRois) {
-    if (!byField[roi.field]) byField[roi.field] = [];
-    byField[roi.field].push(roi);
-  }
-
-  const result = {};
-  // For each field, OCR all its ROI crops and concatenate
-  for (const [field, fieldRois] of Object.entries(byField)) {
-    const texts = [];
-    for (const roi of fieldRois) {
-      const cropped = await cropToRoi(base64img, roi);
-      const { fullText, barcodes } = await visionOCR(apiKey, cropped);
-      texts.push(field === 'sku' && barcodes.length ? barcodes.join(' ') : fullText);
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: { temperature: 0, maxOutputTokens: 512 }
+      })
     }
-    result[field] = texts.join(' ').trim();
+  );
+
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    throw new Error(e.error?.message || `Gemini error ${resp.status}: ${resp.statusText}`);
   }
-  return result;
+
+  const data = await resp.json();
+  const raw  = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+  const clean = raw.replace(/```json|```/g, '').trim();
+
+  try {
+    return JSON.parse(clean);
+  } catch {
+    // If JSON parse fails, try to extract the JSON object from the text
+    const match = clean.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error('Gemini returned unexpected format — try again');
+  }
 }
 
 async function analyzeShots() {
-  const key      = document.getElementById('apiKey').value.trim();
-  const endpoint = document.getElementById('azureEndpoint').value.trim();
-  if (!key)      { toast('Enter your Azure API key first', true); return; }
-  if (!endpoint) { toast('Enter your Azure endpoint URL first', true); return; }
+  const key = document.getElementById('apiKey').value.trim();
+  if (!key) { toast('Enter your Gemini API key first', true); return; }
   const imgs = shots.map((s, i) => s ? { data: s.split(',')[1], idx: i } : null).filter(Boolean);
   if (!imgs.length) { toast('Capture at least one shot', true); return; }
 
@@ -830,77 +791,39 @@ async function analyzeShots() {
   document.getElementById('analyzeBtn').disabled = true;
 
   try {
-    // Determine if any slot has ROIs defined
-    const hasAnyRoi = imgs.some(img => rois[img.idx]?.length > 0);
+    // Build image slots for Gemini — include ROIs if defined for that slot
+    const imageSlots = imgs.map(img => ({
+      base64: img.data,
+      label:  SLOT_LABELS[img.idx] || `Shot ${img.idx + 1}`,
+      rois:   rois[img.idx] || []
+    }));
 
-    let parsed;
-
-    if (hasAnyRoi) {
-      // ROI mode: run cropped OCR per field, merge across slots
-      const fieldTexts = { name:'', brand:'', exp:'', sku:'', size:'' };
-      let allBarcodes  = [];
-
-      for (const img of imgs) {
-        const slotRois = rois[img.idx];
-        if (slotRois?.length > 0) {
-          const ft = await roiFieldTexts(key, img.data, slotRois);
-          if (ft) {
-            for (const [f, t] of Object.entries(ft)) {
-              if (f === 'sku' && /^\d{8,}$/.test(t.trim())) allBarcodes.push(t.trim());
-              fieldTexts[f] = (fieldTexts[f] + ' ' + t).trim();
-            }
-          }
-        } else {
-          // No ROI on this slot — still do full OCR and let parser fill gaps
-          const { fullText, barcodes } = await visionOCR(key, img.data);
-          allBarcodes = [...allBarcodes, ...barcodes];
-          const fp = parseLabel(fullText, barcodes);
-          if (!fieldTexts.name  && fp.name)       fieldTexts.name  = fp.name;
-          if (!fieldTexts.brand && fp.brand)       fieldTexts.brand = fp.brand;
-          if (!fieldTexts.exp   && fp.expiration)  fieldTexts.exp   = fp.expiration;
-          if (!fieldTexts.sku   && fp.sku)         fieldTexts.sku   = fp.sku;
-          if (!fieldTexts.size  && fp.size)        fieldTexts.size  = fp.size;
-        }
-      }
-
-      // Clean up each field text with the parser where needed
-      const mergedText = Object.values(fieldTexts).join('\n');
-      const fallback   = parseLabel(mergedText, allBarcodes);
-
-      parsed = {
-        name:       fieldTexts.name  || fallback.name,
-        brand:      fieldTexts.brand || fallback.brand,
-        expiration: fieldTexts.exp   || fallback.expiration,
-        sku:        (allBarcodes[0]  || fieldTexts.sku || fallback.sku),
-        size:       fieldTexts.size  || fallback.size,
-        notes:      fallback.notes
-      };
-
-    } else {
-      // No ROIs — full image OCR on all shots, merge and parse
-      const results = await Promise.all(imgs.map(img => visionOCR(key, img.data)));
-      const allText     = results.map(r => r.fullText).join('\n\n');
-      const allBarcodes = [...new Set(results.flatMap(r => r.barcodes))];
-      parsed = parseLabel(allText, allBarcodes);
-    }
+    const parsed = await geminiAnalyze(key, imageSlots);
 
     // Generate sample ID
     pendingSampleId = generateId();
     document.getElementById('sampleIdBadge').textContent = pendingSampleId;
 
-    document.getElementById('rf-name').value  = parsed.name  || '';
-    document.getElementById('rf-brand').value = parsed.brand || '';
-    document.getElementById('rf-exp').value   = parsed.expiration || '';
-    document.getElementById('rf-sku').value   = parsed.sku   || '';
-    document.getElementById('rf-size').value  = parsed.size  || '';
-    document.getElementById('rf-notes').value = parsed.notes || '';
+    document.getElementById('rf-name').value  = parsed.name        || '';
+    document.getElementById('rf-brand').value = parsed.brand       || '';
+    document.getElementById('rf-exp').value   = parsed.expiration  || '';
+    document.getElementById('rf-sku').value   = parsed.sku         || '';
+    document.getElementById('rf-size').value  = parsed.size        || '';
+    document.getElementById('rf-notes').value = parsed.notes       || '';
 
     document.getElementById('analyzeBar').classList.remove('on');
     document.getElementById('reviewCard').classList.add('on');
 
     const found = [parsed.name, parsed.expiration, parsed.sku].filter(Boolean).length;
-    if (found === 0) toast('Low confidence — try better lighting or draw ROI boxes', true);
+    if (found === 0) toast('Nothing extracted — try better lighting or draw ROI boxes', true);
     else toast(`Extracted ✓  Sample ID: ${pendingSampleId}`);
+
+  } catch(e) {
+    document.getElementById('analyzeBar').classList.remove('on');
+    document.getElementById('analyzeBtn').disabled = false;
+    toast('Error: ' + e.message, true);
+  }
+}
 
   } catch(e) {
     document.getElementById('analyzeBar').classList.remove('on');
@@ -1055,7 +978,6 @@ function toast(msg, err=false) {
 }
 
 buildGrid();
-document.getElementById('azureEndpoint').value = 'https://samplescanner.cognitiveservices.azure.com/';
 </script>
 <!--
   BUDGET SBC OPTIONS WITH ONBOARD OCR (no API needed):

@@ -263,7 +263,7 @@ td{padding:10px 12px;vertical-align:middle}
       <div class="spinner"></div>
       <div class="analyzing-text">
         <strong>Reading product labels…</strong>
-        Gemini 1.5 Flash · reading all images simultaneously
+        Gemini 2.0 Flash · reading all images simultaneously
       </div>
     </div>
 
@@ -750,13 +750,13 @@ Cross-reference all images. If a field appears in multiple images choose the cle
   });
 
   const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: { temperature: 0, maxOutputTokens: 512 }
+        contents: [{ role: 'user', parts }],
+        generationConfig: { temperature: 0, maxOutputTokens: 1024 }
       })
     }
   );
